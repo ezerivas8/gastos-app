@@ -488,14 +488,40 @@ async function appendToSheets(row){
   try{
     setSyncStatus('syncing');
     const token=await getAccessToken();
-    if(!token){setSyncStatus('error');return false;}
+    if(!token){setSyncStatus('error');return null;}
     const res=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/Hoja%201!A:J:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
       method:'POST',
       headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
       body:JSON.stringify({values:[row]})
     });
-    setSyncStatus(res.ok?'ok':'error');return res.ok;
-  }catch(e){setSyncStatus('error');return false;}
+    if(!res.ok){setSyncStatus('error');return null;}
+    const data=await res.json();
+    // Extract row number from updatedRange e.g. "Hoja 1!A5:J5" -> 5
+    const range=data.updates?.updatedRange||'';
+    const match=range.match(/!A(\d+)/);
+    const rowNum=match?parseInt(match[1]):null;
+    setSyncStatus('ok');
+    return rowNum;
+  }catch(e){setSyncStatus('error');return null;}
+}
+
+async function deleteFromSheets(rowNum){
+  try{
+    const token=await getAccessToken();
+    if(!token)return false;
+    // Get spreadsheet ID to find sheet ID
+    const metaRes=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}?fields=sheets.properties`,{
+      headers:{'Authorization':'Bearer '+token}
+    });
+    const meta=await metaRes.json();
+    const sheetId=meta.sheets?.find(s=>s.properties.title==='Hoja 1')?.properties?.sheetId??0;
+    const res=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}:batchUpdate`,{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({requests:[{deleteDimension:{range:{sheetId,dimension:'ROWS',startIndex:rowNum-1,endIndex:rowNum}}}]})
+    });
+    return res.ok;
+  }catch(e){return false;}
 }
 
 async function initSheets(){
@@ -549,11 +575,27 @@ async function handleSend(){
   const item={id:Date.now(),desc:desc.toUpperCase(),cat:selectedCat,met:selectedMet,moneda:selectedMoneda,amtOrig:rawAmt,amt:amtUYU,date:fecha};
   const items=getData();items.push(item);saveData(items);
   renderItems();
-  const synced=await appendToSheets([fecha,currentUser||'?',desc.toUpperCase(),CATS[selectedCat],MET_LABELS[selectedMet],selectedMoneda.toUpperCase(),rawAmt,amtUYU,amtUSD,tdc]);
-  showToast(synced?'✓ GUARDADO EN SHEETS':'GUARDADO LOCALMENTE',synced?'success':'error');
+  const rowNum=await appendToSheets([fecha,currentUser||'?',desc.toUpperCase(),CATS[selectedCat],MET_LABELS[selectedMet],selectedMoneda.toUpperCase(),rawAmt,amtUYU,amtUSD,tdc]);
+  if(rowNum){
+    // Save row number so we can delete it later
+    const updatedItems=getData();
+    const last=updatedItems[updatedItems.length-1];
+    if(last&&last.id===item.id){last.sheetRow=rowNum;saveData(updatedItems);}
+  }
+  showToast(rowNum?'✓ GUARDADO EN SHEETS':'GUARDADO LOCALMENTE',rowNum?'success':'error');
 }
 
-function deleteItem(id){saveData(getData().filter(i=>i.id!==id));renderItems();}
+async function deleteItem(id){
+  const items=getData();
+  const item=items.find(i=>i.id===id);
+  saveData(items.filter(i=>i.id!==id));
+  renderItems();
+  if(item&&item.sheetRow){
+    const deleted=await deleteFromSheets(item.sheetRow);
+    if(deleted) showToast('✓ ELIMINADO DE SHEETS','success');
+    else showToast('ELIMINADO LOCALMENTE','error');
+  }
+}
 
 function confirmDelete(id){
   const overlay=document.createElement('div');
